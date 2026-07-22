@@ -76,21 +76,24 @@ We think the next step is a model that's **present like a person**: one that wat
 git clone https://github.com/jd-opensource/JoyAI-VL-Interaction.git
 cd JoyAI-VL-Interaction
 
-# Install dependencies
+# Install dependencies (WebUI + background agent only; no GPU required)
 ./install/install.sh --with-all
 
-# Download all model weights
-./install/download-models.sh --all
+# Configure the Bailian Omni realtime API
+export DASHSCOPE_API_KEY=sk-...
+# Optional overrides: OMNI_REALTIME_URL, OMNI_MODEL
 
-# Start the core services
-./services/scripts/run.sh minimal
+# Start the services
+./services/scripts/run.sh all
 ```
 
 Then open `https://127.0.0.1:8099` in your browser.
 
+> **Cloud inference:** Inference now runs via the Alibaba Bailian Qwen-Omni-Realtime cloud API, configured through the `DASHSCOPE_API_KEY`, `OMNI_REALTIME_URL`, and `OMNI_MODEL` environment variables. No local GPU, model weights, or vLLM installation is needed.
+
 > **LiveKit deployment:** To use LiveKit and avoid exposing a large number of service ports, switch to the [`livekit`](https://github.com/jd-opensource/JoyAI-VL-Interaction/tree/livekit) branch with `git switch livekit`. Note that this branch may not be maintained long term.
 
-👉 For the full setup (ASR, TTS, background agent) and configuration details, see the [Getting Started Guide](doc/getting_started.md).
+👉 For the full setup (background agent) and configuration details, see the [Getting Started Guide](doc/getting_started.md).
 
 🚑 If you run into deployment issues, see the [Troubleshooting Guide](doc/troubleshooting.md).
 

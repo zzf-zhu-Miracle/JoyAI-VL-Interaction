@@ -24,19 +24,17 @@ fi
 usage() {
   cat <<'EOF'
 Usage:
-  bash services/scripts/run.sh webinfer          Start webinfer.
-  bash services/scripts/run.sh asr               Start ASR model + adapter.
-  bash services/scripts/run.sh tts               Start TTS model + adapter.
   bash services/scripts/run.sh background-agent  Start background-agent.
   bash services/scripts/run.sh webui             Start WebUI.
-  bash services/scripts/run.sh minimal           Start webinfer, then WebUI.
-  bash services/scripts/run.sh all               Start webinfer, ASR, TTS, background-agent, then WebUI.
+  bash services/scripts/run.sh minimal           Start WebUI only.
+  bash services/scripts/run.sh all               Start background-agent, then WebUI.
+
+Inference runs via the Alibaba Bailian Qwen-Omni-Realtime cloud API.
+Set DASHSCOPE_API_KEY (required), and optionally OMNI_REALTIME_URL / OMNI_MODEL,
+before starting the WebUI.
 
 Environment:
-  START_ASR=0                 Disable ASR when running all.
-  START_TTS=0                 Disable TTS when running all.
   START_BACKGROUND_AGENT=0    Disable background-agent when running all.
-  WEBINFER_ARGS="..."         Extra args for services/webinfer/scripts/run.sh all.
   WEBUI_ARGS="..."            Extra args for services/webui/scripts/start_server.sh.
   SERVICE_READY_TIMEOUT=900   Max seconds to wait for backend readiness before WebUI.
   SERVICE_READY_INTERVAL=5    Seconds between backend readiness checks.
@@ -84,30 +82,8 @@ is_enabled() {
 }
 
 all_service_count() {
-  local total=2
+  local total=1
 
-  if is_enabled "${START_ASR:-1}"; then
-    total=$((total + 1))
-  fi
-  if is_enabled "${START_TTS:-1}"; then
-    total=$((total + 1))
-  fi
-  if is_enabled "${START_BACKGROUND_AGENT:-1}"; then
-    total=$((total + 1))
-  fi
-
-  echo "$total"
-}
-
-all_expanded_script_count() {
-  local total=6
-
-  if is_enabled "${START_TTS:-1}"; then
-    total=$((total + 3))
-  fi
-  if is_enabled "${START_ASR:-1}"; then
-    total=$((total + 3))
-  fi
   if is_enabled "${START_BACKGROUND_AGENT:-1}"; then
     total=$((total + 1))
   fi
@@ -117,25 +93,12 @@ all_expanded_script_count() {
 
 print_all_start_plan() {
   local service_total
-  local expanded_total
 
   service_total="$(all_service_count)"
-  expanded_total="$(all_expanded_script_count)"
 
   echo "Start plan for services/scripts/run.sh all:"
   echo "  Top-level child services: ${service_total}"
-  echo "  Expanded service scripts: ${expanded_total}"
-  echo "  Always starts: webinfer, WebUI"
-  if is_enabled "${START_TTS:-1}"; then
-    echo "  TTS: enabled"
-  else
-    echo "  TTS: disabled"
-  fi
-  if is_enabled "${START_ASR:-1}"; then
-    echo "  ASR: enabled"
-  else
-    echo "  ASR: disabled"
-  fi
+  echo "  Always starts: WebUI"
   if is_enabled "${START_BACKGROUND_AGENT:-1}"; then
     echo "  background-agent: enabled"
   else
@@ -205,42 +168,10 @@ wait_for_http() {
   return 1
 }
 
-wait_for_webinfer_ready() {
-  local main_model_port="${MAIN_MODEL_PORT:-7060}"
-  local summary_port="${SUMMARY_PORT:-8065}"
-  local adapter_port="${ADAPTER_PORT:-8070}"
-
-  wait_for_http "webinfer main model" "http://127.0.0.1:${main_model_port}/v1/models"
-  wait_for_http "webinfer summary model" "http://127.0.0.1:${summary_port}/v1/models"
-  wait_for_http "webinfer adapter" "http://127.0.0.1:${adapter_port}/health"
-}
-
-wait_for_asr_ready() {
-  local asr_model_port="${ASR_MODEL_PORT:-${ASR_PORT:-8993}}"
-  local asr_adapter_port="${ASR_ADAPTER_PORT:-8994}"
-
-  wait_for_http "ASR model" "http://127.0.0.1:${asr_model_port}/v1/models"
-  wait_for_http "ASR adapter" "http://127.0.0.1:${asr_adapter_port}/health"
-}
-
-wait_for_tts_ready() {
-  local tts_model_port="${TTS_MODEL_PORT:-${TTS_PORT:-8991}}"
-  local tts_adapter_port="${TTS_ADAPTER_PORT:-8992}"
-
-  wait_for_http "TTS model" "http://127.0.0.1:${tts_model_port}/v1/models"
-  wait_for_http "TTS adapter" "http://127.0.0.1:${tts_adapter_port}/health"
-}
-
 wait_for_background_agent_ready() {
   local background_agent_port="${BACKGROUND_AGENT_PORT:-${CODEX_API_PORT:-8079}}"
 
   wait_for_http "background-agent" "http://127.0.0.1:${background_agent_port}/health"
-}
-
-wait_for_backends_ready() {
-  echo "Waiting for backend services before starting WebUI..."
-  wait_for_webinfer_ready
-  echo "All required backend services are ready."
 }
 
 cleanup() {
@@ -257,20 +188,6 @@ cleanup() {
   exit "$status"
 }
 
-run_webinfer() {
-  cd "$SERVICES_DIR/webinfer"
-  # shellcheck disable=SC2086
-  exec bash scripts/run.sh all ${WEBINFER_ARGS:-} "$@"
-}
-
-run_asr() {
-  exec bash "$SERVICES_DIR/asr/scripts/run.sh" all "$@"
-}
-
-run_tts() {
-  exec bash "$SERVICES_DIR/tts/scripts/run.sh" all "$@"
-}
-
 run_background_agent() {
   exec bash "$SERVICES_DIR/background-agent/scripts/run.sh" "$@"
 }
@@ -283,11 +200,7 @@ run_webui() {
 
 run_minimal() {
   trap cleanup EXIT INT TERM
-  set_start_total 2
-  start_background "webinfer" bash "$SCRIPT_DIR/run.sh" webinfer
-  echo "Waiting for backend services before starting WebUI..."
-  wait_for_webinfer_ready
-  echo "All required backend services are ready."
+  set_start_total 1
   start_foreground "WebUI" run_webui "$@"
 }
 
@@ -295,37 +208,16 @@ run_all() {
   trap cleanup EXIT INT TERM
   set_start_total "$(all_service_count)"
   print_all_start_plan
-  start_background "webinfer" bash "$SCRIPT_DIR/run.sh" webinfer
-
-  if is_enabled "${START_TTS:-1}"; then
-    start_background "TTS" bash "$SCRIPT_DIR/run.sh" tts
-    wait_for_tts_ready
-  fi
-
-  if is_enabled "${START_ASR:-1}"; then
-    start_background "ASR" bash "$SCRIPT_DIR/run.sh" asr
-    wait_for_asr_ready
-  fi
 
   if is_enabled "${START_BACKGROUND_AGENT:-1}"; then
     start_background "background-agent" bash "$SCRIPT_DIR/run.sh" background-agent
     wait_for_background_agent_ready
   fi
 
-  wait_for_backends_ready
   start_foreground "WebUI" run_webui "$@"
 }
 
 case "$ACTION" in
-  webinfer)
-    run_webinfer "$@"
-    ;;
-  asr)
-    run_asr "$@"
-    ;;
-  tts)
-    run_tts "$@"
-    ;;
   background-agent)
     run_background_agent "$@"
     ;;

@@ -4,18 +4,14 @@
 
 Complete the prerequisites and image build in `../README.md` first.
 
-- Model: INT4 AWQ G32
-- Target GPUs: 1 × 24GB main + 3 × 24GB / 3 APIs
-- `MAX_MODEL_LEN=81920`
-- Main GPU utilization: `0.95` on a physical 24GB GPU
-- Summary context: 8,192 tokens at `0.95`
-- ASR/TTS GPU utilization: `0.40` / `0.60`
-- Memory: 5 mid-term blocks and 5 long-term blocks
-- `CHUNK=100`
+The historical GPU profiles are kept for CLI compatibility, but all profiles now start the
+same two services — WebUI (`:8099`) and background-agent (`:8079`) — with inference on
+the Bailian Qwen-Omni-Realtime cloud API. No local GPU is required.
 
 ```bash
 cp container/24GB/.env.example container/24GB/.env
+# edit .env and set DASHSCOPE_API_KEY
 ./container/manage.sh 24GB up
 ```
 
-Set `MAIN_MODEL_ROOT` to the directory containing `int4_awq_g32`.
+Edit `.env` to change the Omni API configuration or service ports.

@@ -2,21 +2,16 @@
 
 > 原文档: [README.md](./README.md)
 
-请先按照 `../README.zh-CN.md` 完成环境准备和镜像构建。
+请先完成 `../README.zh-CN.md` 中的前置准备和镜像构建。
 
-- 模型：INT4 AWQ G32
-- 目标 GPU：1 × 16GB 主模型 + 3 × 16GB / 3 个 API
-- `MAX_MODEL_LEN=32768`
-- 主模型显存利用率：物理 16GB GPU 的 `0.95`
-- 摘要模型上下文：8,192 token，显存利用率 `0.95`
-- ASR/TTS 显存利用率：`0.60` / `0.90`
-- 记忆：中期 3 块，长期 1 块
-- 摘要上限：3,000 token
-- `CHUNK=70`
+历史遗留的 GPU 规格仅为兼容命令行而保留；所有规格现在都启动相同的两个服务——
+WebUI（`:8099`）和 background-agent（`:8079`），推理走百炼 Qwen-Omni-Realtime
+云端 API，无需本地 GPU。
 
 ```bash
 cp container/16GB/.env.example container/16GB/.env
+# 编辑 .env 并设置 DASHSCOPE_API_KEY
 ./container/manage.sh 16GB up
 ```
 
-将 `MAIN_MODEL_ROOT` 指向包含 `int4_awq_g32` 的目录。
+编辑 `.env` 可修改 Omni API 配置或服务端口。

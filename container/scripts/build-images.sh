@@ -21,10 +21,5 @@ build() {
 
 docker image inspect python:3.12-slim-bookworm >/dev/null
 docker image inspect node:22-bookworm-slim >/dev/null
-docker image inspect vllm/vllm-openai:v0.22.0 >/dev/null
 build joyai-vl-app:latest Dockerfile.app
-build joyai-vl-asr-adapter:latest Dockerfile.asr-adapter
-build joyai-vl-tts-adapter:latest Dockerfile.tts-adapter
 build joyai-vl-background-model:latest Dockerfile.background --build-arg "CODEX_BUILD_VERSION=$codex_version"
-build joyai-vl-asr-model:vllm0.22.0 Dockerfile.asr-model --build-arg "VLLM_IMAGE=vllm/vllm-openai:v0.22.0"
-build joyai-vl-tts-model:vllm0.22.0 Dockerfile.tts-model --build-arg "VLLM_IMAGE=vllm/vllm-openai:v0.22.0"

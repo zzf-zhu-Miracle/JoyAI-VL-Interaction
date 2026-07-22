@@ -9,10 +9,6 @@ if [[ $# -gt 0 ]]; then
 fi
 
 GRACE_SECONDS="${GRACE_SECONDS:-10}"
-ASR_MODEL_PORT="${ASR_MODEL_PORT:-8993}"
-ASR_ADAPTER_PORT="${ASR_ADAPTER_PORT:-8994}"
-TTS_MODEL_PORT="${TTS_MODEL_PORT:-8991}"
-TTS_ADAPTER_PORT="${TTS_ADAPTER_PORT:-8992}"
 BACKGROUND_AGENT_PORT="${BACKGROUND_AGENT_PORT:-8079}"
 WEBUI_PORT="${WEBUI_PORT:-8099}"
 PIDS_TO_KILL=()
@@ -21,16 +17,11 @@ usage() {
   cat <<EOF
 Usage:
   bash services/scripts/stop.sh all               Stop all services.
-  bash services/scripts/stop.sh webinfer          Stop webinfer.
-  bash services/scripts/stop.sh asr               Stop ASR model + adapter.
-  bash services/scripts/stop.sh tts               Stop TTS model + adapter.
   bash services/scripts/stop.sh background-agent  Stop background-agent.
   bash services/scripts/stop.sh webui             Stop WebUI.
 
 Environment:
   GRACE_SECONDS=10
-  ASR_MODEL_PORT=8993 ASR_ADAPTER_PORT=8994
-  TTS_MODEL_PORT=8991 TTS_ADAPTER_PORT=8992
   BACKGROUND_AGENT_PORT=8079 WEBUI_PORT=8099
 EOF
 }
@@ -138,40 +129,6 @@ kill_collected_pids() {
   fi
 }
 
-stop_webinfer() {
-  bash "$SERVICES_DIR/webinfer/scripts/stop.sh" all
-}
-
-stop_asr() {
-  PIDS_TO_KILL=()
-  add_pids_on_port "${ASR_ADAPTER_PORT}"
-  add_pids_on_port "${ASR_MODEL_PORT}"
-  add_pids_by_pattern "${SERVICES_DIR}/asr/scripts/run.sh"
-  add_pids_by_pattern "${SERVICES_DIR}/asr/scripts/run-model.sh"
-  add_pids_by_pattern "${SERVICES_DIR}/asr/scripts/run-adapter.sh"
-  add_pids_by_pattern "services/asr/scripts/run.sh"
-  add_pids_by_pattern "services/asr/scripts/run-model.sh"
-  add_pids_by_pattern "services/asr/scripts/run-adapter.sh"
-  add_pids_by_pattern "joyvl-asr-adapter"
-  add_pids_by_pattern "vllm serve .*Qwen3-ASR"
-  kill_collected_pids "asr"
-}
-
-stop_tts() {
-  PIDS_TO_KILL=()
-  add_pids_on_port "${TTS_ADAPTER_PORT}"
-  add_pids_on_port "${TTS_MODEL_PORT}"
-  add_pids_by_pattern "${SERVICES_DIR}/tts/scripts/run.sh"
-  add_pids_by_pattern "${SERVICES_DIR}/tts/scripts/run-model.sh"
-  add_pids_by_pattern "${SERVICES_DIR}/tts/scripts/run-adapter.sh"
-  add_pids_by_pattern "services/tts/scripts/run.sh"
-  add_pids_by_pattern "services/tts/scripts/run-model.sh"
-  add_pids_by_pattern "services/tts/scripts/run-adapter.sh"
-  add_pids_by_pattern "joyvl-tts-adapter"
-  add_pids_by_pattern "vllm-omni serve .*Qwen3-TTS"
-  kill_collected_pids "tts"
-}
-
 stop_background_agent() {
   PIDS_TO_KILL=()
   add_pids_on_port "${BACKGROUND_AGENT_PORT}"
@@ -194,23 +151,11 @@ stop_webui() {
 stop_all() {
   stop_webui
   stop_background_agent
-  stop_tts
-  stop_asr
-  stop_webinfer
 }
 
 case "${ACTION}" in
   all)
     stop_all
-    ;;
-  webinfer)
-    stop_webinfer
-    ;;
-  asr)
-    stop_asr
-    ;;
-  tts)
-    stop_tts
     ;;
   background-agent|background_agent|background)
     stop_background_agent

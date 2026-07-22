@@ -3543,17 +3543,6 @@ limitations under the License.
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
-
-                        <div class="settings-item">
-                            <div>
-                                <div class="settings-item-label">Show memory state</div>
-                                <div class="settings-item-description">Display mid-term and long-term memory content below VLM output</div>
-                            </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="debugShowMemoryState">
-                                <span class="toggle-slider"></span>
-                            </label>
-                        </div>
                     </div>
                 </div>
             </div>
@@ -3831,16 +3820,6 @@ limitations under the License.
                     <details style="margin: 0;">
                         <summary style="cursor: pointer; font-size: 12px; color: var(--text-secondary);">Response payload (debug)</summary>
                         <pre id="responsePayloadContent" style="margin: 8px 0 0; padding: 10px; background: var(--bg-secondary); border-radius: 8px; font-size: 11px; overflow: auto; max-height: 240px; white-space: pre-wrap; word-break: break-all;"></pre>
-                    </details>
-                </div>
-                <div id="memoryStateDebug" class="debug-payload-block" style="display: none; margin-top: 8px;">
-                    <details open style="margin: 0;">
-                        <summary style="cursor: pointer; font-size: 12px; color: var(--text-secondary);">Mid-term memory</summary>
-                        <pre id="midTermMemoryContent" style="margin: 8px 0 0; padding: 10px; background: var(--bg-secondary); border-radius: 8px; font-size: 11px; overflow: auto; max-height: 300px; white-space: pre-wrap; word-break: break-all;"></pre>
-                    </details>
-                    <details open style="margin: 4px 0 0;">
-                        <summary style="cursor: pointer; font-size: 12px; color: var(--text-secondary);">Long-term memory</summary>
-                        <pre id="longTermMemoryContent" style="margin: 8px 0 0; padding: 10px; background: var(--bg-secondary); border-radius: 8px; font-size: 11px; overflow: auto; max-height: 300px; white-space: pre-wrap; word-break: break-all;"></pre>
                     </details>
                 </div>
                 <div class="prompt-editor-inline">
@@ -5421,17 +5400,6 @@ limitations under the License.
             ttsWsReadyPromise = null;
         }
 
-        function maybeSpeakPendingTts() {
-            if (ttsSpeaking || !pendingTtsText) {
-                return;
-            }
-
-            const nextText = pendingTtsText;
-            pendingTtsText = '';
-            ttsRequestToken += 1;
-            startTtsSpeech(nextText);
-        }
-
         function getTtsWebSocket() {
             if (ttsWs && ttsWs.readyState === WebSocket.OPEN) {
                 return Promise.resolve(ttsWs);
@@ -5442,10 +5410,14 @@ limitations under the License.
             }
 
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/api/tts`;
+            const wsUrl = `${protocol}//${window.location.host}/api/tts?session_id=${encodeURIComponent(sessionId)}`;
             const ws = new WebSocket(wsUrl);
             ttsWs = ws;
             ws.binaryType = 'arraybuffer';
+            ws._sampleRate = 24000;
+            ws._requestId = '';
+            ws._acceptingAudio = false;
+            ws._serverDone = false;
 
             ttsWsReadyPromise = new Promise((resolve, reject) => {
                 ws.onopen = () => {
@@ -5456,9 +5428,6 @@ limitations under the License.
                     }
                 };
                 ws.onerror = (error) => {
-                    if (ttsWs === ws) {
-                        lastTtsEventKey = '';
-                    }
                     reject(error instanceof Error ? error : new Error('TTS websocket failed'));
                 };
             });
@@ -5478,35 +5447,35 @@ limitations under the License.
                     }
 
                     if (message.type === 'start') {
-                        const startedRequestId = String(message.request_id || message.reqid || '');
-                        if (startedRequestId === ws._pendingRequestId) {
-                            ws._sampleRate = Number(message.sample_rate) || ws._sampleRate || 24000;
-                            ws._requestId = startedRequestId;
-                            ws._acceptingAudio = true;
-                            ws._serverDone = false;
-                        }
-                    } else if (message.type === 'done' || message.type === 'stopped') {
-                        if (message.request_id && String(message.request_id) === ws._requestId) {
+                        ws._sampleRate = Number(message.sample_rate) || ws._sampleRate || 24000;
+                    } else if (message.type === 'response.done' || message.type === 'done' || message.type === 'stopped') {
+                        if (ws._requestId) {
                             ws._acceptingAudio = false;
                             ws._serverDone = true;
-                            scheduleTtsFinishCheck(String(message.request_id));
-                            maybeFinishTtsSpeech(String(message.request_id));
+                            scheduleTtsFinishCheck(ws._requestId);
+                            maybeFinishTtsSpeech(ws._requestId);
                         }
                     } else if (message.type === 'error') {
-                        lastTtsEventKey = '';
-                        console.warn('TTS playback failed:', message.error);
-                        if (message.request_id && String(message.request_id) === ws._requestId) {
+                        console.warn('TTS playback failed:', message.error || message.message);
+                        if (ws._requestId) {
                             ws._acceptingAudio = false;
                             ws._serverDone = true;
-                            maybeFinishTtsSpeech(String(message.request_id), { failed: true });
+                            maybeFinishTtsSpeech(ws._requestId, { failed: true });
                         }
                     }
                     return;
                 }
 
-                const activeRequestId = String(ttsRequestToken);
-                if (!ws._acceptingAudio || ws._requestId !== activeRequestId) {
-                    return;
+                // Binary pcm16 audio pushed by the server for the current response.
+                if (!ws._acceptingAudio) {
+                    ttsRequestToken += 1;
+                    ws._requestId = String(ttsRequestToken);
+                    ws._acceptingAudio = true;
+                    ws._serverDone = false;
+                    ttsSpeaking = true;
+                    ttsPcmRemainder = null;
+                    ttsNextPlayTime = 0;
+                    updateTtsSpeakingDisplay(getVlmDisplayText(lastText));
                 }
                 queueTtsPcmChunk(event.data, ws._sampleRate || 24000, ttsRequestToken);
             };
@@ -5515,6 +5484,13 @@ limitations under the License.
                 if (ttsWs === ws) {
                     ttsWs = null;
                     ttsWsReadyPromise = null;
+                    if (isAnalysisRunning && settings.ttsEnabled) {
+                        setTimeout(() => {
+                            if (isAnalysisRunning && settings.ttsEnabled && !ttsWs) {
+                                getTtsWebSocket().catch(err => console.warn('TTS reconnect failed:', err));
+                            }
+                        }, 2000);
+                    }
                 }
             };
 
@@ -5632,65 +5608,7 @@ limitations under the License.
                 ttsSpeaking = false;
                 ttsPcmRemainder = null;
                 updateTtsSpeakingDisplay('');
-                maybeSpeakPendingTts();
             }
-        }
-
-        function startTtsSpeech(speechText) {
-            const requestToken = ttsRequestToken;
-            ttsSpeaking = true;
-            updateTtsSpeakingDisplay(speechText);
-            ttsPcmRemainder = null;
-            ttsNextPlayTime = 0;
-
-            getTtsWebSocket().then(ws => {
-                if (requestToken !== ttsRequestToken || !settings.ttsEnabled) {
-                    ttsSpeaking = false;
-                    updateTtsSpeakingDisplay('');
-                    maybeSpeakPendingTts();
-                    return;
-                }
-                ws._sampleRate = 24000;
-                ws._requestId = '';
-                ws._pendingRequestId = String(requestToken);
-                ws._acceptingAudio = false;
-                ws._serverDone = false;
-                ws.send(JSON.stringify({
-                    type: 'speak',
-                    text: speechText,
-                    session_id: sessionId,
-                    request_id: String(requestToken)
-                }));
-            }).catch(error => {
-                if (requestToken === ttsRequestToken) {
-                    lastTtsEventKey = '';
-                    ttsSpeaking = false;
-                    updateTtsSpeakingDisplay('');
-                    console.warn('TTS playback failed:', error);
-                    maybeSpeakPendingTts();
-                }
-            });
-        }
-
-        function speakVlmText(text, eventKey = '') {
-            const speechText = String(text || '').trim();
-            const speechEventKey = String(eventKey || '').trim();
-            if (!settings.ttsEnabled || !speechText) {
-                return;
-            }
-            if (speechEventKey && speechEventKey === lastTtsEventKey) {
-                return;
-            }
-
-            lastTtsEventKey = speechEventKey || `event:${++ttsEventSequence}`;
-
-            if (ttsSpeaking) {
-                pendingTtsText = speechText;
-                return;
-            }
-
-            ttsRequestToken += 1;
-            startTtsSpeech(speechText);
         }
 
         function clearVlmConversation() {
@@ -5726,12 +5644,6 @@ limitations under the License.
             if (requestPayloadContent) requestPayloadContent.textContent = '';
             if (responsePayloadDebug) responsePayloadDebug.style.display = 'none';
             if (responsePayloadContent) responsePayloadContent.textContent = '';
-            const memoryStateDebug = document.getElementById('memoryStateDebug');
-            if (memoryStateDebug) memoryStateDebug.style.display = 'none';
-            const midTermMemoryContent = document.getElementById('midTermMemoryContent');
-            if (midTermMemoryContent) midTermMemoryContent.textContent = '';
-            const longTermMemoryContent = document.getElementById('longTermMemoryContent');
-            if (longTermMemoryContent) longTermMemoryContent.textContent = '';
 
             syncVlmToFullscreen();
         }
@@ -6451,10 +6363,6 @@ limitations under the License.
             const historyKey = hasInferenceKey
                 ? `count:${metrics.total_inferences}`
                 : `text:${text}`;
-            const ttsEventKey = hasInferenceKey
-                ? historyKey
-                : `event:${++ttsEventSequence}`;
-            speakVlmText(displayText, ttsEventKey);
             const pendingEntry = pendingPromptEntry && vlmHistory.includes(pendingPromptEntry)
                 && isForegroundHistoryEntry(pendingPromptEntry)
                 ? pendingPromptEntry
@@ -8011,20 +7919,16 @@ limitations under the License.
             if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
             const req = document.getElementById('debugShowRequestPayload');
             const res = document.getElementById('debugShowResponsePayload');
-            const mem = document.getElementById('debugShowMemoryState');
             websocket.send(JSON.stringify({
                 type: 'set_debug',
                 show_request_payload: !!req?.checked,
-                show_response_payload: !!res?.checked,
-                show_memory_state: !!mem?.checked
+                show_response_payload: !!res?.checked
             }));
         }
         const debugShowRequestPayload = document.getElementById('debugShowRequestPayload');
         const debugShowResponsePayload = document.getElementById('debugShowResponsePayload');
-        const debugShowMemoryState = document.getElementById('debugShowMemoryState');
         const requestPayloadDebugEl = document.getElementById('requestPayloadDebug');
         const responsePayloadDebugEl = document.getElementById('responsePayloadDebug');
-        const memoryStateDebugEl = document.getElementById('memoryStateDebug');
         if (debugShowRequestPayload) {
             debugShowRequestPayload.addEventListener('change', () => {
                 sendDebugFlags();
@@ -8037,12 +7941,6 @@ limitations under the License.
                 if (responsePayloadDebugEl) responsePayloadDebugEl.style.display = debugShowResponsePayload.checked ? 'block' : 'none';
             });
         }
-        if (debugShowMemoryState) {
-            debugShowMemoryState.addEventListener('change', () => {
-                sendDebugFlags();
-                if (memoryStateDebugEl) memoryStateDebugEl.style.display = debugShowMemoryState.checked ? 'block' : 'none';
-            });
-        }
 
         [backgroundEnabledToggle, backgroundFrameMultiplier, backgroundMaxFrames].forEach(control => {
             if (!control) return;
@@ -8052,9 +7950,6 @@ limitations under the License.
                 setTimeout(() => control.classList?.remove('applied'), 600);
             });
         });
-
-        // Memory state change detection for console logging
-        let _lastMemoryStateHash = '';
 
 
         // WebSocket Connection
@@ -8136,18 +8031,6 @@ limitations under the License.
                         }
                         logLatencyBreakdown(data.metrics);
                     }
-                    if (data.summarizer_timing) {
-                        const st = data.summarizer_timing;
-                        const stKey = JSON.stringify(st);
-                        if (stKey !== window._lastSummarizerKey) {
-                            window._lastSummarizerKey = stKey;
-                            let parts = [];
-                            if (st.last_mid_term_ms != null) parts.push(`mid-term=${st.last_mid_term_ms}ms (chunk#${st.last_mid_term_chunk})`);
-                            if (st.barrier_wait_ms != null) parts.push(`barrier_wait=${st.barrier_wait_ms}ms`);
-                            if (st.last_long_term_ms != null) parts.push(`long-term=${st.last_long_term_ms}ms`);
-                            if (parts.length) console.log(`[summary model] ${parts.join(', ')}`);
-                        }
-                    }
                     if (data.request_payload) {
                         const block = document.getElementById('requestPayloadDebug');
                         const pre = document.getElementById('requestPayloadContent');
@@ -8162,48 +8045,6 @@ limitations under the License.
                         if (block && pre && document.getElementById('debugShowResponsePayload')?.checked) {
                             block.style.display = 'block';
                             pre.textContent = JSON.stringify(data.response_payload, null, 2);
-                        }
-                    }
-                    if (data.memory_state) {
-                        const summaries = data.memory_state.mid_term_summaries || [];
-                        const longTerm = data.memory_state.long_term_memory || '';
-                        const memHash = JSON.stringify(data.memory_state);
-                        if (memHash !== _lastMemoryStateHash) {
-                            _lastMemoryStateHash = memHash;
-                            // UI display (controlled by toggle)
-                            const memBlock = document.getElementById('memoryStateDebug');
-                            if (memBlock && document.getElementById('debugShowMemoryState')?.checked) {
-                                memBlock.style.display = 'block';
-                                const midPre = document.getElementById('midTermMemoryContent');
-                                if (midPre) {
-                                    midPre.textContent = summaries.length
-                                        ? summaries.map(s => `[Chunk ${s.chunk_index} | ${s.frame_range}]\n${s.summary_text}`).join('\n\n')
-                                        : '(empty)';
-                                }
-                                const ltPre = document.getElementById('longTermMemoryContent');
-                                if (ltPre) {
-                                    ltPre.textContent = longTerm || '(empty)';
-                                }
-                            }
-                            // Console output
-                            console.group('%c[Memory State]', 'color: #4fc3f7; font-weight: bold;');
-                            if (summaries.length) {
-                                console.groupCollapsed(`Mid-term memory (${summaries.length} chunks)`);
-                                summaries.forEach(s => {
-                                    console.log(`%c[Chunk ${s.chunk_index} | ${s.frame_range}]`, 'color: #81c784;', '\n' + s.summary_text);
-                                });
-                                console.groupEnd();
-                            } else {
-                                console.log('Mid-term memory: (empty)');
-                            }
-                            if (longTerm) {
-                                console.groupCollapsed('Long-term memory');
-                                console.log(longTerm);
-                                console.groupEnd();
-                            } else {
-                                console.log('Long-term memory: (empty)');
-                            }
-                            console.groupEnd();
                         }
                     }
                 } else if (data.type === 'status') {
@@ -8242,13 +8083,11 @@ limitations under the License.
                     applySystemPromptOptions(data.system_prompt_options, data.system_prompt_key);
                     const reqCb = document.getElementById('debugShowRequestPayload');
                     const resCb = document.getElementById('debugShowResponsePayload');
-                    const memCb = document.getElementById('debugShowMemoryState');
-                    if ((reqCb?.checked || resCb?.checked || memCb?.checked) && websocket && websocket.readyState === WebSocket.OPEN) {
+                    if ((reqCb?.checked || resCb?.checked) && websocket && websocket.readyState === WebSocket.OPEN) {
                         websocket.send(JSON.stringify({
                             type: 'set_debug',
                             show_request_payload: !!reqCb?.checked,
-                            show_response_payload: !!resCb?.checked,
-                            show_memory_state: !!memCb?.checked
+                            show_response_payload: !!resCb?.checked
                         }));
                     }
                 } else if (data.type === 'model_updated') {
@@ -8275,6 +8114,12 @@ limitations under the License.
                 } else if (data.type === 'background_config_updated') {
                     applyBackgroundConfig(data.background_model);
                     console.log('Background model config updated:', data.background_model);
+                } else if (data.type === 'omni_speech_started') {
+                    // Server-side VAD detected user speech: interrupt playback (barge-in)
+                    stopTtsPlayback();
+                } else if (data.type === 'omni_error') {
+                    console.warn('Omni error:', data.message);
+                    updateStatus(`Omni: ${String(data.message || '').slice(0, 120)}`, 'disconnected');
                 }
             };
 
@@ -8379,6 +8224,8 @@ limitations under the License.
                 } catch (error) {
                     console.warn('Unable to initialize TTS audio context:', error);
                 }
+                // Open the persistent Omni audio downstream once per session.
+                getTtsWebSocket().catch(error => console.warn('TTS websocket connect failed:', error));
             }
 
             // Animate big button

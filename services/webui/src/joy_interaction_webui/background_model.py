@@ -60,16 +60,6 @@ BACKGROUND_MAX_SUBAGENTS = int(
         ),
     )
 )
-BACKGROUND_SUMMARIZER_API_BASE = os.environ.get(
-    "BACKGROUND_SUMMARIZER_API_BASE",
-    os.environ.get("LIVE_VLM_API_BASE", "http://127.0.0.1:8070/v1"),
-)
-BACKGROUND_SUMMARIZER_MODEL = os.environ.get(
-    "BACKGROUND_SUMMARIZER_MODEL",
-    os.environ.get("SUMMARIZER_MODEL", "/tmp/models/Qwen3-VL-4B-Instruct"),
-)
-BACKGROUND_SUMMARIZER_TIMEOUT_SECONDS = float(os.environ.get("BACKGROUND_SUMMARIZER_TIMEOUT_SECONDS", "60"))
-BACKGROUND_SUMMARIZER_MAX_TOKENS = int(os.environ.get("BACKGROUND_SUMMARIZER_MAX_TOKENS", "256"))
 BACKGROUND_FRAME_MULTIPLIER = 2
 BACKGROUND_DEFAULT_FOREGROUND_FPS = 1.0
 BACKGROUND_DEFAULT_MAX_FRAMES = 100
@@ -372,9 +362,6 @@ class BackgroundModelService:
         disable_response_storage: Optional[bool] = None,
         max_tokens: Optional[int] = None,
         timeout_seconds: float = BACKGROUND_TIMEOUT_SECONDS,
-        summarizer_api_base: str = BACKGROUND_SUMMARIZER_API_BASE,
-        summarizer_model: str = BACKGROUND_SUMMARIZER_MODEL,
-        summarizer_timeout_seconds: float = BACKGROUND_SUMMARIZER_TIMEOUT_SECONDS,
         frame_multiplier: int = BACKGROUND_FRAME_MULTIPLIER,
         max_frames: Optional[int] = None,
         foreground_fps: float = BACKGROUND_DEFAULT_FOREGROUND_FPS,
@@ -393,9 +380,6 @@ class BackgroundModelService:
         self._legacy_disable_response_storage = disable_response_storage
         self._legacy_max_tokens = max_tokens
         self.timeout_seconds = float(timeout_seconds)
-        self.summarizer_api_base = str(summarizer_api_base or BACKGROUND_SUMMARIZER_API_BASE).rstrip("/")
-        self.summarizer_model = str(summarizer_model or BACKGROUND_SUMMARIZER_MODEL)
-        self.summarizer_timeout_seconds = max(1.0, float(summarizer_timeout_seconds))
         self.frame_multiplier = max(1, int(frame_multiplier))
         self.max_frame_count = self._normalize_max_frames(
             max_frames if max_frames is not None else BACKGROUND_DEFAULT_MAX_FRAMES
@@ -468,9 +452,6 @@ class BackgroundModelService:
             "sandbox": "yolo",
             "max_subagents": self.max_subagents,
             "timeout_seconds": self.timeout_seconds,
-            "summarizer_api_base": self.summarizer_api_base,
-            "summarizer_model": self.summarizer_model,
-            "summarizer_timeout_seconds": self.summarizer_timeout_seconds,
             "frame_multiplier": self.frame_multiplier,
             "max_frames": self.max_frame_count,
             "foreground_fps": self.foreground_fps,
@@ -502,18 +483,6 @@ class BackgroundModelService:
         if resize_long_edge is not None:
             self.resize_long_edge = self._normalize_resize_long_edge(resize_long_edge)
         self._resize_frame_buffer()
-        return self.get_config()
-
-    def update_summary_api(
-        self,
-        *,
-        api_base: Optional[str] = None,
-        model: Optional[str] = None,
-    ) -> dict:
-        if api_base:
-            self.summarizer_api_base = str(api_base).rstrip("/")
-        if model:
-            self.summarizer_model = str(model)
         return self.get_config()
 
     def set_foreground_frames_per_batch(self, frames_per_batch: int) -> None:
@@ -664,6 +633,57 @@ class BackgroundModelService:
         self._active_tasks.add(task)
         task.add_done_callback(self._discard_task)
         return delegation.foreground_text
+
+    def delegate_question(
+        self,
+        question: str,
+        foreground_text: str = "",
+        metrics: Optional[dict] = None,
+    ) -> Optional[str]:
+        """Start background work for an explicit delegation (e.g. an Omni tool call).
+
+        Returns the new task_id, or None when the delegation was skipped.
+        """
+        cleaned = clean_delegation_question_for_display(question) or str(question or "").strip()
+        if not cleaned:
+            logger.warning("[%s] Background delegation skipped: empty question", self.session_id)
+            return None
+        if not self.enabled or self._closed:
+            logger.info(
+                "[%s] Background delegation skipped: enabled=%s closed=%s question=%s",
+                self.session_id,
+                self.enabled,
+                self._closed,
+                _shorten_log_text(cleaned),
+            )
+            return None
+
+        delegation = DelegationRequest(
+            foreground_text=str(foreground_text or "").strip()
+            or "这个问题已委托给后台模型处理，请稍等。",
+            question=cleaned,
+            original_foreground_text=str(foreground_text or "").strip(),
+            raw_text="",
+            raw_question=cleaned,
+        )
+        self._task_sequence += 1
+        task_id = f"bg-{self.session_id}-{self._task_sequence}-{uuid.uuid4().hex[:8]}"
+        frames = self._snapshot_frames()
+        logger.info(
+            "[%s] Background delegation queued: task_id=%s frames=%s target_frames=%s question=%s",
+            self.session_id,
+            task_id,
+            len(frames),
+            self._target_frame_count(),
+            _shorten_log_text(delegation.question),
+        )
+        task = asyncio.create_task(
+            self._run_delegation_task(task_id, delegation, frames, metrics or {}),
+            name=f"background-delegation:{self.session_id}:{self._task_sequence}",
+        )
+        self._active_tasks.add(task)
+        task.add_done_callback(self._discard_task)
+        return task_id
 
     def _discard_task(self, task: asyncio.Task) -> None:
         self._active_tasks.discard(task)
@@ -826,54 +846,6 @@ class BackgroundModelService:
             data = response.json()
         return self._normalize_background_result(data)
 
-    async def summarize_background_result(self, *, question: str, result: str) -> str:
-        text = str(result or "").strip()
-        if not text:
-            return ""
-        prompt = (
-            "请把下面后台模型的完整回答压缩成给前端摘要卡展示的简短摘要。\n"
-            "要求：\n"
-            "- 使用中文。\n"
-            "- 只输出摘要正文，不要标题、列表编号或客套话。\n"
-            "- 1 到 2 句话，保留结论/关键步骤/产物类型。\n"
-            "- 不要补充原文没有的信息。\n\n"
-            f"用户问题：{str(question or '').strip()}\n\n"
-            f"后台完整回答：\n{text}"
-        )
-        payload = {
-            "model": self.summarizer_model,
-            "user": f"background-summary:{self.session_id}",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            "max_tokens": BACKGROUND_SUMMARIZER_MAX_TOKENS,
-            "temperature": 0.1,
-            "top_p": 0.9,
-        }
-        url = f"{self.summarizer_api_base}/chat/completions"
-        try:
-            timeout = httpx.Timeout(self.summarizer_timeout_seconds, connect=5.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(
-                    url,
-                    json=payload,
-                    headers={"x-streaming-session": f"background-summary:{self.session_id}"},
-                )
-                response.raise_for_status()
-                data = response.json()
-            summary = self._extract_chat_completion_text(data)
-            return self._normalize_summary_text(summary)
-        except Exception as err:
-            logger.warning(
-                "[%s] Background summary model failed: %s",
-                self.session_id,
-                err,
-            )
-            return ""
-
     def _frame_to_payload(self, frame: BackgroundFrame) -> dict:
         return {
             "image_url": self._image_to_data_url(frame.image),
@@ -942,20 +914,6 @@ class BackgroundModelService:
         summary = self._normalize_summary_text(match.group(1))
         body = (value[: match.start()] + value[match.end() :]).strip()
         return summary, body
-
-    def _extract_chat_completion_text(self, value) -> str:
-        if not isinstance(value, dict):
-            return ""
-        choices = value.get("choices")
-        if not isinstance(choices, list) or not choices:
-            return ""
-        first = choices[0]
-        if not isinstance(first, dict):
-            return ""
-        message = first.get("message")
-        if isinstance(message, dict):
-            return self._normalize_text_value(message.get("content"))
-        return self._normalize_text_value(first.get("text"))
 
     def _normalize_summary_text(self, value) -> str:
         text = self._normalize_text_value(value)

@@ -76,21 +76,24 @@
 git clone https://github.com/jd-opensource/JoyAI-VL-Interaction.git
 cd JoyAI-VL-Interaction
 
-# 安装依赖
+# 安装依赖（仅 WebUI + 后台 agent，无需 GPU）
 ./install/install.sh --with-all
 
-# 下载所有模型权重
-./install/download-models.sh --all
+# 配置百炼 Omni realtime API
+export DASHSCOPE_API_KEY=sk-...
+# 可选覆盖项：OMNI_REALTIME_URL、OMNI_MODEL
 
-# 启动核心服务
-./services/scripts/run.sh minimal
+# 启动服务
+./services/scripts/run.sh all
 ```
 
 然后在浏览器中打开 `https://127.0.0.1:8099`。
 
+> **云端推理：** 推理现已通过阿里云百炼 Qwen-Omni-Realtime 云端 API 运行，通过 `DASHSCOPE_API_KEY`、`OMNI_REALTIME_URL`、`OMNI_MODEL` 环境变量进行配置。无需本地 GPU、模型权重或 vLLM 安装。
+
 > **LiveKit 部署：** 如需使用 LiveKit 并避免对外开放大量服务端口，可通过 `git switch livekit` 切换到 [`livekit`](https://github.com/jd-opensource/JoyAI-VL-Interaction/tree/livekit) 分支。请注意，该分支可能不会长期维护。
 
-👉 如需完整部署 ASR、TTS、后台 agent 以及更多配置细节，请参阅[入门指南](doc/getting_started.zh-CN.md)。
+👉 如需完整部署后台 agent 以及更多配置细节，请参阅[入门指南](doc/getting_started.zh-CN.md)。
 
 🚑 如果遇到部署问题，请参阅[故障排查指南](doc/troubleshooting.zh-CN.md)。
 

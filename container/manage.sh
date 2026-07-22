@@ -28,16 +28,9 @@ stop_others() {
   done
 }
 check_images() {
-  local main_image
   local image
-  main_image="$(sed -n 's/^VLLM_IMAGE=//p' "$env_file" | tail -1)"
   for image in \
-    "$main_image" \
     joyai-vl-app:latest \
-    joyai-vl-asr-model:vllm0.22.0 \
-    joyai-vl-asr-adapter:latest \
-    joyai-vl-tts-model:vllm0.22.0 \
-    joyai-vl-tts-adapter:latest \
     joyai-vl-background-model:latest; do
     docker image inspect "$image" >/dev/null 2>&1 || {
       echo "Missing image: $image" >&2
@@ -64,12 +57,7 @@ case "$action" in
   logs) compose logs -f --tail=200 ;;
   test)
     compose ps -a
-    curl -fsS http://127.0.0.1:7060/v1/models
-    curl -fsS http://127.0.0.1:8065/v1/models
-    curl -fsS http://127.0.0.1:8070/health
     curl -fsS http://127.0.0.1:8079/health
-    curl -fsS http://127.0.0.1:8994/health
-    curl -fsS http://127.0.0.1:8992/health
     curl -kfsS https://127.0.0.1:8099/ >/dev/null
     ;;
   *) usage ;;

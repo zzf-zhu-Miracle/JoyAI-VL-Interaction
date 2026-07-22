@@ -42,11 +42,11 @@ if [[ "${SAVE_SERVICE_LOGS:-0}" == "1" ]]; then
 fi
 
 export PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}"
+# Inference runs via the Bailian Omni realtime API; model/endpoint come from
+# OMNI_MODEL / OMNI_REALTIME_URL (and DASHSCOPE_API_KEY) when not passed explicitly.
 exec python -m joy_interaction_webui.server \
   --ssl-cert cert.pem \
   --ssl-key key.pem \
   --host "${WEBUI_HOST}" \
   --port "${WEBUI_PORT}" \
-  --model streaming-infer-adapter \
-  --api-base http://127.0.0.1:8070/v1 \
   "$@"

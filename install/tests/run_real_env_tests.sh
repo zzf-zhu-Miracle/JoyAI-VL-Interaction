@@ -41,8 +41,6 @@ fi
 mkdir -p "$TEST_ROOT"
 
 run_case no_with
-run_case with_asr --with-asr
-run_case with_tts --with-tts
 run_case with_background_agent --with-background-agent --max-subagents "$MAX_SUBAGENTS"
 run_case with_all --with-all --max-subagents "$MAX_SUBAGENTS"
 

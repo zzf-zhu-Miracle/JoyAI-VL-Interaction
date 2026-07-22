@@ -47,6 +47,7 @@ from .asr import setup_asr_routes
 from .tts import setup_tts_routes
 from .background_model import BackgroundModelService
 from .local_file_server import setup_local_file_routes
+from .omni_session import DELEGATE_TOOL_NAME, OMNI_MODEL, OMNI_REALTIME_URL
 
 # Configure logging
 logging.basicConfig(
@@ -67,6 +68,39 @@ sessions = {}  # session_id -> {"vlm_service": VLMService}
 session_websockets = defaultdict(set)  # session_id -> set of ws
 ws_to_session = {}  # ws -> session_id
 session_peer_connections = defaultdict(set)  # session_id -> set of RTCPeerConnection
+session_asr_clients = defaultdict(dict)  # session_id -> {browser asr ws: state}
+session_tts_clients = defaultdict(set)  # session_id -> set of browser tts ws
+
+
+def get_omni_for_session(session_id: str):
+    """Return the Omni realtime session for a browser session (creating it lazily)."""
+    return get_or_create_session(session_id)["vlm_service"].omni
+
+
+def register_asr_client(session_id: str, ws) -> dict:
+    state = {"saw_completed": False}
+    session_asr_clients[session_id][ws] = state
+    return state
+
+
+def unregister_asr_client(session_id: str, ws) -> None:
+    clients = session_asr_clients.get(session_id)
+    if clients is not None:
+        clients.pop(ws, None)
+        if not clients:
+            session_asr_clients.pop(session_id, None)
+
+
+def register_tts_client(session_id: str, ws) -> None:
+    session_tts_clients[session_id].add(ws)
+
+
+def unregister_tts_client(session_id: str, ws) -> None:
+    clients = session_tts_clients.get(session_id)
+    if clients is not None:
+        clients.discard(ws)
+        if not clients:
+            session_tts_clients.pop(session_id, None)
 
 
 def notify_session_json(session_id: str, payload: dict):
@@ -76,34 +110,205 @@ def notify_session_json(session_id: str, payload: dict):
 
 
 def handle_background_handoff_for_interaction(session_id: str, payload: dict) -> None:
-    if not isinstance(payload, dict) or payload.get("type") != "background_result_ready":
+    if not isinstance(payload, dict):
+        return
+    if payload.get("type") not in {"background_result_ready", "background_result_error"}:
         return
 
     session = sessions.get(session_id)
     if not session or not session.get("vlm_service"):
         return
-    handoff = payload.get("interaction_handoff")
-    summary = ""
-    if isinstance(handoff, dict):
-        summary = str(handoff.get("summary") or "").strip()
-    if not summary:
+
+    task_id = str(payload.get("task_id") or "")
+    svc = session["vlm_service"]
+
+    if payload.get("type") == "background_result_ready":
+        handoff = payload.get("interaction_handoff")
+        summary = ""
+        if isinstance(handoff, dict):
+            summary = str(handoff.get("summary") or "").strip()
+        if not summary:
+            logger.info(
+                "[%s] Background result received without interaction handoff: task_id=%s",
+                session_id,
+                task_id,
+            )
+            return
+        svc.queue_background_handoff(
+            task_id=task_id,
+            question=str(payload.get("question") or ""),
+            summary=summary,
+        )
+        output = json.dumps(
+            {"task_id": task_id, "status": "completed", "summary": summary},
+            ensure_ascii=False,
+        )
+    else:
+        output = json.dumps(
+            {
+                "task_id": task_id,
+                "status": "failed",
+                "error": str(payload.get("error") or "unknown error"),
+            },
+            ensure_ascii=False,
+        )
+
+    # Return the result to the Omni model so it can speak the outcome.
+    pending_calls = session.get("omni_pending_calls") or {}
+    call_id = pending_calls.pop(task_id, None)
+    if not call_id:
         logger.info(
-            "[%s] Background result received without interaction handoff: task_id=%s",
+            "[%s] Background result has no pending Omni tool call: task_id=%s",
             session_id,
-            payload.get("task_id"),
+            task_id,
         )
         return
-    session["vlm_service"].queue_background_handoff(
-        task_id=str(payload.get("task_id") or ""),
-        question=str(payload.get("question") or ""),
-        summary=summary,
-    )
     logger.info(
-        "[%s] Background handoff queued for interaction: task_id=%s summary_chars=%s",
+        "[%s] Sending background result to Omni as function output: task_id=%s call_id=%s",
         session_id,
-        payload.get("task_id"),
-        len(summary),
+        task_id,
+        call_id,
     )
+    asyncio.create_task(svc.omni.send_function_output(call_id, output))
+
+
+def _ensure_omni_wired(session_id: str) -> None:
+    """Attach Omni realtime event callbacks for a session (once)."""
+    session = sessions.get(session_id)
+    if not session or session.get("omni_wired"):
+        return
+    svc = session.get("vlm_service")
+    if svc is None:
+        return
+    session["omni_wired"] = True
+    session.setdefault("omni_pending_calls", {})  # task_id -> call_id
+    session["omni_out_text"] = ""  # accumulated response transcript
+    session["omni_partial_transcript"] = ""  # accumulated input transcript delta
+
+    omni = svc.omni
+
+    async def on_input_transcript(phase, text, stash):
+        if phase == "delta":
+            session["omni_partial_transcript"] += text
+            event = "IS_PARTIAL"
+            transcript = session["omni_partial_transcript"]
+            final = False
+        else:
+            event = "IS_FINAL"
+            transcript = text or session["omni_partial_transcript"]
+            session["omni_partial_transcript"] = ""
+            final = True
+        if not transcript:
+            return
+        result = {
+            "type": "result",
+            "event": event,
+            "mid": session_id,
+            "text": transcript,
+            "confidence": None,
+            "final": final,
+            "code": 0,
+            "msg": "",
+        }
+        message = json.dumps(result, ensure_ascii=False)
+        for client_ws, state in list(session_asr_clients.get(session_id, {}).items()):
+            if final:
+                state["saw_completed"] = True
+            try:
+                await client_ws.send_str(message)
+            except Exception as e:
+                logger.debug("[%s] Failed to forward ASR result: %s", session_id, e)
+
+    async def on_output_transcript(phase, text):
+        if phase == "delta":
+            svc.begin_omni_response()
+            session["omni_out_text"] += text
+            out_text = session["omni_out_text"]
+            final = False
+        else:
+            out_text = text or session["omni_out_text"]
+            session["omni_out_text"] = ""
+            svc.update_omni_response(out_text, final=True)
+            final = True
+        payload = {"type": "vlm_response", "text": out_text, "metrics": svc.get_metrics()}
+        if final:
+            handoff_meta = svc.consume_background_handoff_metric()
+            if handoff_meta:
+                payload["metrics"] = dict(payload["metrics"])
+                payload["metrics"]["background_handoff"] = handoff_meta
+        send_to_session(session_id, json.dumps(payload, ensure_ascii=False))
+
+    async def on_audio(pcm_bytes):
+        for client_ws in list(session_tts_clients.get(session_id, set())):
+            try:
+                await client_ws.send_bytes(pcm_bytes)
+            except Exception as e:
+                logger.debug("[%s] Failed to push Omni audio: %s", session_id, e)
+
+    async def on_audio_done():
+        message = json.dumps({"type": "response.done"})
+        for client_ws in list(session_tts_clients.get(session_id, set())):
+            try:
+                await client_ws.send_str(message)
+            except Exception as e:
+                logger.debug("[%s] Failed to push Omni audio done: %s", session_id, e)
+
+    async def on_speech_started():
+        session["omni_partial_transcript"] = ""
+        send_to_session(session_id, json.dumps({"type": "omni_speech_started"}))
+
+    async def on_response_done():
+        pass
+
+    async def on_function_call(call_id, name, arguments):
+        if name != DELEGATE_TOOL_NAME:
+            logger.warning("[%s] Unknown Omni function call: %s", session_id, name)
+            return
+        try:
+            args = json.loads(arguments) if arguments else {}
+        except json.JSONDecodeError:
+            args = {}
+        question = str(args.get("question") or "").strip()
+        bg_svc = session.get("background_service")
+        task_id = None
+        if bg_svc is not None and question:
+            task_id = bg_svc.delegate_question(
+                question,
+                metrics={"user_prompt": question, "omni_call_id": call_id},
+            )
+        if task_id:
+            session["omni_pending_calls"][task_id] = call_id
+            logger.info(
+                "[%s] Omni delegate_to_agent: task_id=%s call_id=%s question=%s",
+                session_id,
+                task_id,
+                call_id,
+                question[:120],
+            )
+        else:
+            output = json.dumps(
+                {
+                    "status": "skipped",
+                    "reason": "background agent unavailable or empty question",
+                },
+                ensure_ascii=False,
+            )
+            await omni.send_function_output(call_id, output)
+
+    async def on_error(message):
+        send_to_session(
+            session_id,
+            json.dumps({"type": "omni_error", "message": str(message)}, ensure_ascii=False),
+        )
+
+    omni.on_input_transcript = on_input_transcript
+    omni.on_output_transcript = on_output_transcript
+    omni.on_audio = on_audio
+    omni.on_audio_done = on_audio_done
+    omni.on_speech_started = on_speech_started
+    omni.on_response_done = on_response_done
+    omni.on_function_call = on_function_call
+    omni.on_error = on_error
 
 
 def get_background_service(session_id: str):
@@ -120,7 +325,7 @@ def get_or_create_session(session_id: str):
         cfg = default_vlm_config
         sessions[session_id] = {
             "vlm_service": VLMService(
-                model=cfg.get("model", "meta/llama-3.2-11b-vision-instruct"),
+                model=cfg.get("model") or OMNI_MODEL,
                 api_base=cfg.get("api_base", "http://localhost:8000/v1"),
                 api_key=cfg.get("api_key", "EMPTY"),
                 prompt=cfg.get("prompt") or None,
@@ -130,13 +335,12 @@ def get_or_create_session(session_id: str):
             "background_service": BackgroundModelService(
                 session_id=session_id,
                 notify_callback=lambda payload, sid=session_id: notify_session_json(sid, payload),
-                summarizer_api_base=cfg.get("api_base", "http://localhost:8000/v1"),
             ),
             "show_request_payload": False,
             "show_response_payload": False,
-            "show_memory_state": False,
         }
         logger.info(f"Created new session: {session_id}")
+    _ensure_omni_wired(session_id)
     return sessions[session_id]
 
 
@@ -151,10 +355,12 @@ def send_to_session(session_id: str, message: str):
 
 def get_session_callback(session_id: str):
     """Return a text_callback that sends VLM results only to this session."""
-    _last_memory_hash = [None]
 
     def callback(text: str, metrics: dict):
         session = sessions.get(session_id)
+        if session and getattr(session.get("vlm_service"), "is_omni", False):
+            # Omni responses are pushed directly from the session callbacks.
+            return
         display_text = text
         if session and session.get("background_service"):
             display_text = session["background_service"].handle_foreground_response(
@@ -176,18 +382,6 @@ def get_session_callback(session_id: str):
                         out["response_payload"] = json.loads(json.dumps(payload, default=str))
                     except (TypeError, ValueError):
                         out["response_payload"] = payload
-            resp = svc.get_last_response_payload()
-            if resp and isinstance(resp, dict):
-                sh = resp.get("streamingharness", {})
-                memory = sh.get("memory") if isinstance(sh, dict) else None
-                if memory:
-                    mem_hash = json.dumps(memory, ensure_ascii=False, sort_keys=True)
-                    if mem_hash != _last_memory_hash[0]:
-                        _last_memory_hash[0] = mem_hash
-                        out["memory_state"] = memory
-                summarizer_timing = sh.get("summarizer_timing") if isinstance(sh, dict) else None
-                if summarizer_timing:
-                    out["summarizer_timing"] = summarizer_timing
         send_to_session(session_id, json.dumps(out, ensure_ascii=False))
 
     return callback
@@ -213,6 +407,20 @@ async def cleanup_session(session_id: str, reset_adapter: bool = True) -> dict:
     if session_id in rtsp_tracks:
         await _stop_rtsp_session(session_id)
 
+    asr_clients = session_asr_clients.pop(session_id, {})
+    for client_ws in asr_clients:
+        try:
+            await client_ws.close()
+        except Exception as e:
+            logger.warning("[%s] Error closing ASR websocket: %s", session_id, e)
+
+    tts_clients = session_tts_clients.pop(session_id, set())
+    for client_ws in tts_clients:
+        try:
+            await client_ws.close()
+        except Exception as e:
+            logger.warning("[%s] Error closing TTS websocket: %s", session_id, e)
+
     pcs_for_session = list(session_peer_connections.pop(session_id, set()))
     for pc in pcs_for_session:
         try:
@@ -229,7 +437,7 @@ async def cleanup_session(session_id: str, reset_adapter: bool = True) -> dict:
         svc = session["vlm_service"]
         cancelled = await svc.cancel_active_requests()
         if reset_adapter:
-            await svc.reset_adapter_session()
+            await svc.reset_conversation()
         await svc.close(cancel_requests=False)
     if session and session.get("background_service"):
         bg_svc = session["background_service"]
@@ -361,7 +569,7 @@ async def models(request):
         api_base = request.rel_url.query.get("api_base")
         api_key = request.rel_url.query.get("api_key")
 
-        if api_base:
+        if api_base and "omni" not in api_base.lower() and not api_base.startswith("wss"):
             # Query models from the provided API endpoint
             from openai import AsyncOpenAI
 
@@ -375,12 +583,10 @@ async def models(request):
                 content_type="application/json", text=json.dumps({"models": models_list})
             )
         else:
-            # Use default session's VLM service (backwards compat when no api_base in query)
+            # Omni realtime API: single configured model, no /models listing
             default_svc = get_or_create_session("default")["vlm_service"]
-            models_response = await default_svc.client.models.list()
             models_list = [
-                {"id": model.id, "name": model.id, "current": model.id == default_svc.model}
-                for model in models_response.data
+                {"id": default_svc.model, "name": default_svc.model, "current": True}
             ]
             return web.Response(
                 content_type="application/json", text=json.dumps({"models": models_list})
@@ -511,7 +717,7 @@ async def websocket_handler(request):
                     if data.get("type") == "update_prompt":
                         new_prompt = data.get("prompt", "").strip()
                         if svc:
-                            svc.update_prompt(new_prompt)
+                            await svc.send_user_text(new_prompt)
                             logger.info(f"[{session_id}] Prompt updated: {new_prompt}")
 
                             await ws.send_json(
@@ -539,12 +745,9 @@ async def websocket_handler(request):
                         api_key = data.get("api_key", "").strip()
 
                         if new_model and svc:
-                            svc.model = new_model
+                            svc.update_model(new_model)
                             if api_base:
                                 svc.update_api_settings(api_base, api_key if api_key else None)
-                                bg_svc = get_background_service(session_id)
-                                if bg_svc:
-                                    bg_svc.update_summary_api(api_base=svc.api_base)
                                 logger.info(
                                     f"[{session_id}] Model updated: {new_model}, API: {api_base}"
                                 )
@@ -680,20 +883,15 @@ async def websocket_handler(request):
                             session_data["show_response_payload"] = bool(
                                 data["show_response_payload"]
                             )
-                        if "show_memory_state" in data:
-                            session_data["show_memory_state"] = bool(
-                                data["show_memory_state"]
-                            )
                         logger.debug(
                             f"[{session_id}] Debug: request_payload="
                             f"{session_data.get('show_request_payload')}, response_payload="
-                            f"{session_data.get('show_response_payload')}, memory_state="
-                            f"{session_data.get('show_memory_state')}"
+                            f"{session_data.get('show_response_payload')}"
                         )
 
                     elif data.get("type") == "reset_session":
-                        logger.info(f"[{session_id}] Client requested adapter session reset")
-                        asyncio.create_task(svc.reset_adapter_session())
+                        logger.info(f"[{session_id}] Client requested session reset")
+                        asyncio.create_task(svc.reset_conversation())
 
                     elif data.get("type") == "cleanup_session":
                         logger.info(f"[{session_id}] Client requested session cleanup")
@@ -1154,8 +1352,18 @@ async def create_app(test_mode=False):
     app.router.add_get("/models", models)
     app.router.add_get("/detect-services", detect_services)
     app.router.add_get("/ws", websocket_handler)
-    setup_asr_routes(app)
-    setup_tts_routes(app)
+    setup_asr_routes(
+        app,
+        omni_resolver=get_omni_for_session,
+        register_client=register_asr_client,
+        unregister_client=unregister_asr_client,
+    )
+    setup_tts_routes(
+        app,
+        omni_resolver=get_omni_for_session,
+        register_client=register_tts_client,
+        unregister_client=unregister_tts_client,
+    )
     setup_local_file_routes(app)
     app.router.add_post("/offer", offer)
     app.router.add_post("/api/session/cleanup", session_cleanup)
@@ -1359,37 +1567,14 @@ def main():
         config_dir = get_app_config_dir()
         args.ssl_key = str(config_dir / "key.pem")
 
-    # Auto-detect service and model if not specified
-    api_base = args.api_base
-    model = args.model
+    # Omni realtime defaults: model and endpoint come from env, key is env-only
+    api_base = args.api_base or OMNI_REALTIME_URL
+    model = args.model or OMNI_MODEL
     api_key = args.api_key
 
-    if not model or not api_base:
-        logger.info("No model/API specified, auto-detecting local services...")
-        detected_api_base, detected_model = asyncio.run(detect_local_service_and_model())
-
-        if detected_api_base and detected_model:
-            if not api_base:
-                api_base = detected_api_base
-            if not model:
-                model = detected_model
-        else:
-            # Fall back to NVIDIA NGC
-            logger.warning("⚠️  No local VLM service found (Ollama, vLLM, SGLang)")
-            logger.info("📡 Falling back to NVIDIA API Catalog")
-            logger.info("   You'll need an API key from: https://build.nvidia.com")
-            if not api_base:
-                api_base = "https://integrate.api.nvidia.com/v1"
-            if not model:
-                model = (
-                    os.environ.get("LIVE_VLM_DEFAULT_MODEL") or "meta/llama-3.2-11b-vision-instruct"
-                ).strip()
-                if os.environ.get("LIVE_VLM_DEFAULT_MODEL"):
-                    logger.info(f"Using default model from env: {model}")
-            if api_key == "EMPTY":
-                logger.warning("⚠️  API key required for NVIDIA API Catalog")
-                logger.warning("   Set with: --api-key YOUR_API_KEY")
-                logger.warning("   Or use WebUI to configure API settings after starting")
+    if not os.environ.get("DASHSCOPE_API_KEY"):
+        logger.warning("⚠️  DASHSCOPE_API_KEY is not set - Omni realtime sessions will fail")
+        logger.warning("   Set it before starting: export DASHSCOPE_API_KEY=sk-...")
 
     # Initialize VLM service and default session for multi-session support
     global vlm_service, default_vlm_config
@@ -1406,11 +1591,9 @@ def main():
         "background_service": BackgroundModelService(
             session_id="default",
             notify_callback=lambda payload: notify_session_json("default", payload),
-            summarizer_api_base=api_base,
         ),
         "show_request_payload": False,
         "show_response_payload": False,
-        "show_memory_state": False,
     }
 
     # Log initialization with better formatting
