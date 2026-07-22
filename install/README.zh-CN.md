@@ -25,6 +25,16 @@ WebUI 通过环境变量连接百炼 Omni realtime API：
 | `DASHSCOPE_API_KEY` | 是 | 百炼（DashScope）API Key |
 | `OMNI_REALTIME_URL` | 否 | Omni realtime WebSocket 端点（内置默认值） |
 | `OMNI_MODEL` | 否 | realtime 模型名（默认 `qwen3.5-omni-flash-realtime`） |
+| `OMNI_VOICE` | 否 | realtime 输出音色（默认 `Ethan`） |
+| `OMNI_INSTRUCTIONS` | 否 | realtime 系统指令（内置中文默认值） |
+| `OMNI_TURN_DETECTION` | 否 | `semantic_vad`（默认）/ `server_vad` / `none` |
+| `PROACTIVE_ENABLED` | 否 | 是否启用主动播报（默认 `true`） |
+| `PROACTIVE_API_BASE` | 否 | 主动播报使用的 chat completions 端点（内置默认值） |
+| `PROACTIVE_MODEL` | 否 | 主动播报模型名（默认 `qwen3.5-omni-flash`） |
+| `PROACTIVE_INTERVAL_S` | 否 | 主动播报检测间隔秒数（默认 `3.0`） |
+| `PROACTIVE_MAX_TOKENS` | 否 | 主动播报最大输出 token 数（默认 `128`） |
+| `PROACTIVE_COOLDOWN_S` | 否 | 两次注入提醒之间的最小秒数（默认 `15`） |
+| `PROACTIVE_SYSTEM_PROMPT` | 否 | 主动播报系统提示词（内置中文默认值） |
 
 ```bash
 export DASHSCOPE_API_KEY=sk-...

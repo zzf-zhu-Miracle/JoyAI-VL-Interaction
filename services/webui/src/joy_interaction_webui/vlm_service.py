@@ -34,6 +34,7 @@ from .omni_session import (
     OMNI_MODEL,
     OmniRealtimeSession,
 )
+from .proactive_watcher import ProactiveWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,10 @@ class VLMService:
             instructions=_INSTRUCTIONS_BY_KEY[self.system_prompt_key],
             delegation_enabled=self.system_prompt_key != SYSTEM_PROMPT_NO_DELEGATION_KEY,
         )
+        self.proactive_watcher = ProactiveWatcher(
+            session_id,
+            inject_callback=self._inject_proactive_alert,
+        )
         self.current_response = "Initializing..."
         self.is_processing = False
         self._processing_lock = asyncio.Lock()
@@ -152,11 +157,22 @@ class VLMService:
         try:
             img_byte_arr = io.BytesIO()
             image.save(img_byte_arr, format="JPEG")
-            await self.omni.append_image(img_byte_arr.getvalue())
+            jpeg_bytes = img_byte_arr.getvalue()
+            self.proactive_watcher.start()  # idempotent; no-op when disabled
+            self.proactive_watcher.submit_frame(jpeg_bytes)
+            await self.omni.append_image(jpeg_bytes)
             return ""
         except Exception as e:
             logger.warning(f"Error sending frame to Omni session {self.session_id}: {e}")
             return ""
+
+    async def _inject_proactive_alert(self, text: str) -> None:
+        try:
+            await self.omni.inject_proactive_alert(text)
+        except Exception as e:
+            logger.warning(
+                f"Error injecting proactive alert into Omni session {self.session_id}: {e}"
+            )
 
     async def process_frame(
         self,
@@ -346,11 +362,13 @@ class VLMService:
         if cancel_requests:
             await self.cancel_active_requests()
         self.clear_state()
+        await self.proactive_watcher.stop()
         await self.omni.close()
 
     async def reset_conversation(self) -> bool:
         """Close the Omni connection; the next send starts a fresh conversation."""
         try:
+            await self.proactive_watcher.stop()
             await self.omni.reset()
             return True
         except Exception as e:
@@ -373,6 +391,7 @@ class VLMService:
             "latency_breakdown_ms": self.last_latency_breakdown_ms,
             "frame_timing_ms": self.last_frame_timing_ms,
             "user_prompt": self.last_user_prompt,
+            "proactive": self.proactive_watcher.stats(),
         }
         if self._last_background_handoff_meta:
             metrics["background_handoff"] = self._last_background_handoff_meta

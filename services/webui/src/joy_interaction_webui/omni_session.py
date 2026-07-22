@@ -140,6 +140,9 @@ class OmniRealtimeSession:
         self._audio_sent = False
         self._connect_failures = 0
         self._connect_backoff_until = 0.0
+        self._response_in_progress = False
+        self._response_idle = asyncio.Event()
+        self._response_idle.set()
 
     # ------------------------------------------------------------------
     # Connection management
@@ -324,10 +327,20 @@ class OmniRealtimeSession:
                     event.get("name") or "",
                     event.get("arguments") or "",
                 )
+        elif event_type == "response.created":
+            self._response_in_progress = True
+            self._response_idle.clear()
         elif event_type == "response.done":
+            self._response_in_progress = False
+            self._response_idle.set()
             if self.on_response_done:
                 await self.on_response_done()
+        elif event_type == "response.cancelled":
+            self._response_in_progress = False
+            self._response_idle.set()
         elif event_type == "error":
+            self._response_in_progress = False
+            self._response_idle.set()
             message = json.dumps(event.get("error") or event, ensure_ascii=False)
             logger.error("[%s] Omni API error: %s", self.session_id, message)
             await self._emit_error(message)
@@ -440,6 +453,42 @@ class OmniRealtimeSession:
         await self._send({"type": "response.create"})
         return True
 
+    async def inject_proactive_alert(self, text: str) -> bool:
+        """Inject a proactive watcher alert as a user message for the model to speak.
+
+        Bypasses the transcript-echo dedup guard in send_user_text and waits
+        for any in-flight response to finish (briefly) to avoid a
+        response.create collision.
+        """
+        text = str(text or "").strip()
+        if not text:
+            return False
+        await self.ensure_connected()
+        if self._response_in_progress:
+            try:
+                await asyncio.wait_for(self._response_idle.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[%s] Proactive alert: in-flight response did not finish in time; injecting anyway",
+                    self.session_id,
+                )
+        wrapped = (
+            f"【监控提醒】{text}"
+            "（请用口语自然地把这条重要提醒告知用户，不要提及“监控提醒”四个字）"
+        )
+        await self._send(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": wrapped}],
+                },
+            }
+        )
+        await self._send({"type": "response.create"})
+        return True
+
     async def send_function_output(self, call_id: str, output: str) -> None:
         """Return a function call result to the model and let it speak the outcome."""
         if not call_id:
@@ -488,6 +537,8 @@ class OmniRealtimeSession:
         self._ws = None
         reader = self._reader_task
         self._reader_task = None
+        self._response_in_progress = False
+        self._response_idle.set()
         if ws is not None:
             try:
                 await ws.close()

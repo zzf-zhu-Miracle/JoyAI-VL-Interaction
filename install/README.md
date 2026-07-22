@@ -28,6 +28,16 @@ The WebUI connects to the Bailian Omni realtime API via environment variables:
 | `DASHSCOPE_API_KEY` | yes | Bailian (DashScope) API key |
 | `OMNI_REALTIME_URL` | no | Omni realtime WebSocket endpoint (built-in default) |
 | `OMNI_MODEL` | no | Realtime model name (default `qwen3.5-omni-flash-realtime`) |
+| `OMNI_VOICE` | no | Realtime output voice (default `Ethan`) |
+| `OMNI_INSTRUCTIONS` | no | Realtime system instructions (built-in Chinese default) |
+| `OMNI_TURN_DETECTION` | no | `semantic_vad` (default) / `server_vad` / `none` |
+| `PROACTIVE_ENABLED` | no | Enable proactive alerts / 主动播报 (default `true`) |
+| `PROACTIVE_API_BASE` | no | Chat-completions endpoint for the watcher (built-in default) |
+| `PROACTIVE_MODEL` | no | Watcher model name (default `qwen3.5-omni-flash`) |
+| `PROACTIVE_INTERVAL_S` | no | Watcher check interval in seconds (default `3.0`) |
+| `PROACTIVE_MAX_TOKENS` | no | Watcher max output tokens (default `128`) |
+| `PROACTIVE_COOLDOWN_S` | no | Min seconds between injected alerts (default `15`) |
+| `PROACTIVE_SYSTEM_PROMPT` | no | Watcher system prompt (built-in Chinese default) |
 
 ```bash
 export DASHSCOPE_API_KEY=sk-...
